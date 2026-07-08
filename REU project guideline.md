@@ -54,14 +54,14 @@
 - **Per season:** `[ ]` S1  `[ ]` S2  `[ ]` S3 …
 
 ### Task 7 — Line width (FWHM & dispersion)
-- **Goal:** Measure Hβ width on mean and rms spectra. Adopt the \<f> value from Wu et. al. 2015
-- **Do:** Build mean + rms spectra, measure FWHM and σ_line. Per season.
+- **Goal:** Measure Hβ width on mean and rms spectra. 
+- **Do:** Build mean + rms spectra, subtract the narrow component from mean spectra (subtract_narrow_mean pipeline), and measure FWHM and σ_line for broad Hβ. Per season.
 - **Deliver:** FWHM + dispersion table (mean \& rms) per season. Put code/results in `results/season_x/line_width/`
 - **Per season:** `[ ]` S1  `[ ]` S2  `[ ]` S3 …
 
 ### Task 8 — Black hole mass
 - **Goal:** M_BH per season (use the equation provided).
-- **Do:** Combine lag (Task 6) + width (Task 7).
+- **Do:** Combine lag (Task 6) + width (Task 7). Adopt the \<f> value from Wu et. al. 2015
 - **Deliver:** M_BH value per season. Put code/results in `results/season_x/mass/`
 - **Per season:** `[ ]` S1  `[ ]` S2  `[ ]` S3 …
 
