@@ -1,3 +1,5 @@
+Version 0.15: add err column for mean spectrum.
+
 Version 0.13: add MW dust reddening correction code.
 
 Version 0.12: update guidebook step7 on how to estimate and subtract narrow component before measuring the FWHM of Hbeta. Add subtract_narrow_mean pipeline code.
