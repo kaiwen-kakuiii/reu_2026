@@ -28,7 +28,7 @@
 - **Done when:** `[ ]` every season has a clear JD range  `[ ]` make a plot showing the season cut `[ ]` you will label all later results by season
 
 ### Task 3 — Get data ready
-- **Do:** Apply reddening correction and rest-wavelength to combined and cali files, keeps names all the same
+- **Do:** Apply reddening correction (MW_dust_correction) and rest-wavelength to combined and cali files, keeps names all the same
 - **Deliver:** apply to spec files in `data/wiro/` and save them to `data/wiro_reduced` for spec_lc pipeline
 
 ### Task 4 — Measure Hβ flux & 5100Å luminosity (spec_lc pipeline)
