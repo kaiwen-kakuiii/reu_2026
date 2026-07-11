@@ -1,3 +1,5 @@
+Version 0.20: add code to do linewidth measurement.
+
 Version 0.15: add err column for mean spectrum.
 
 Version 0.13: add MW dust reddening correction code.
