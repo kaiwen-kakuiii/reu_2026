@@ -1,3 +1,5 @@
+Version 0.21: update mean/rms spec code.
+
 Version 0.20: add code to do linewidth measurement.
 
 Version 0.15: add err column for mean spectrum.
