@@ -9,20 +9,34 @@ execution over many objects.
 Input spectrum is in REST-FRAME wavelength (3 columns: wave flux err).
 All windows are rest-frame Angstrom, given on the command line.
 
-Pipeline (logic of code_asymmetry.py:subtract_narrow_lines):
-  0. global linear continuum from two line-free windows (median flux)
-  1. subtract [OIII]4959 using the [OIII]5007 profile as template
-     (free: wavelength shift, flux ratio, local linear background)
-  2. extract the clean [OIII]5007 profile with a local linear continuum
-     -> this profile is the narrow-line template
-  3. fit the Hbeta window with (shifted/scaled template) + two Gaussians
-     + constant, then subtract only the narrow template part
+This script runs FIRST in the workflow. With --input-dir/--flux-lst it also
+runs step 0 (moved from spec_lc_pipeline): stack the AGN-only rest-frame
+per-epoch combined spectra into the campaign mean & RMS spectra, write
+spec_mean_<line>.txt / spec_rms_<line>.txt, and fit the narrow model on that
+mean (the positional spec argument is then ignored). spec_lc_pipeline and
+measure_linewidth load these files back -- they no longer build them.
+
+Pipeline (logic of code_asymmetry.py:subtract_narrow_lines, with the [OIII]
+steps decoupled from the global continuum):
+  0. (optional) stack per-epoch combined spectra -> mean & RMS spectra
+     (saved); the mean becomes the fit input
+  1. subtract [OIII]4959 from the RAW flux using the [OIII]5007 profile as
+     template (free: wavelength shift, flux ratio, local linear background;
+     the background absorbs the continuum under 4959)
+  2. extract the clean [OIII]5007 profile with its own local linear
+     continuum -> this profile is the narrow-line template
+  3. global linear continuum from two line-free windows (median flux) is
+     subtracted ONLY here: fit the Hbeta window with (shifted/scaled
+     template) + two Gaussians + constant, then subtract only the narrow
+     template part
 
 Uncertainties (Monte Carlo): flux perturbed by err * N(0,1), N re-runs;
 per-pixel scatter of the narrow model gives its 1-sigma uncertainty; the
 error written for the subtracted spectrum is sqrt(err^2 + sigma_narrow^2).
 
 Outputs (obj tag = --obj, default: current directory name)
+  spec_mean_<line>.txt            campaign mean spectrum (with --input-dir)
+  spec_rms_<line>.txt             campaign RMS spectrum  (with --input-dir)
   <spec>.subnarrow                wave  flux_sub  err_combined
   <obj>_narrow_profile.txt        narrow model and components +/- 1 sigma
   <obj>_oiii5007_template.txt     clean template: wave flux err sigma_mc
@@ -30,10 +44,17 @@ Outputs (obj tag = --obj, default: current directory name)
 
 Usage
 -----
-  python subtract_narrow_mean.py combined.txt.meanrms \\
+  # step 0 + narrow fit (build the mean/rms, then fit the mean):
+  python subtract_narrow_mean.py \\
+      --input-dir agn_only_dered_spectra --flux-lst flux.lst \\
       --contil 4670 4740 --contir 5080 5150 --oiii 4990 5022 \\
+      [--line-name hbeta] [--exclude rebin .out] \\
       [--oiii4959 4935 4977] [--hb 4800 4920] \\
       [--obj NAME] [--mc 500] [--seed 42] [--no-plot] [--show]
+
+  # narrow fit only, on an existing rest-frame mean spectrum:
+  python subtract_narrow_mean.py spec_mean_hbeta.txt \\
+      --contil 4670 4740 --contir 5080 5150 --oiii 4990 5022 [...]
 """
 
 import argparse
@@ -56,6 +77,101 @@ C_CON = '#CC79A7'        # continuum / background lines
 def read_spec(filename):
     data = np.loadtxt(filename)
     return data[:, 0], data[:, 1], data[:, 2]
+
+
+# ---------------- step 0: campaign mean & RMS spectra ----------------
+# Moved from spec_lc_pipeline: this script runs FIRST in the workflow, so the
+# campaign mean (narrow-fit input) and RMS are built here; spec_lc_pipeline
+# and measure_linewidth load the saved files back.
+
+def load_spectrum(path):
+    """Return (wavelength, flux, err) sorted by wavelength.
+
+    Robust to either (N, 3) column layout or (3, N) row layout.
+    """
+    arr = np.loadtxt(path)
+    if arr.ndim != 2:
+        raise ValueError('Spectrum %s is not 2-D (shape %s).' % (path, arr.shape))
+    if arr.shape[1] == 3:        # (N, 3): columns are wl, flux, err
+        lam, f, e = arr.T
+    elif arr.shape[0] == 3:      # (3, N): rows are wl, flux, err
+        lam, f, e = arr
+    else:
+        raise ValueError('Spectrum %s is not 3-column (shape %s).'
+                         % (path, arr.shape))
+    order = np.argsort(lam)
+    return lam[order], f[order], e[order]
+
+
+def read_epochs(flux_lst, input_dir, combined_pattern, exclude):
+    """(name, jd) of the combined epochs listed in flux_lst, sorted by JD."""
+    names, jds = [], []
+    with open(flux_lst) as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name = parts[0]
+            if combined_pattern not in name or \
+                    any(s in name for s in exclude):
+                continue
+            try:
+                jd = float(parts[1])
+            except ValueError:          # header / non-numeric line
+                continue
+            if not os.path.exists(os.path.join(input_dir, name)):
+                print('  [skip] %s: not found in input dir' % name)
+                continue
+            names.append(name)
+            jds.append(jd)
+    order = np.argsort(jds)
+    return [names[i] for i in order], np.asarray(jds, float)[order]
+
+
+def build_mean_rms(input_dir, flux_lst, line_name, combined_pattern, exclude):
+    """Stack the per-epoch combined spectra; write mean & RMS spectra.
+
+    Returns the path of the mean spectrum (the narrow-fit input). Files are
+    3-column (wave, flux, err) in RAW flux units so downstream readers
+    (spec_lc_pipeline, measure_linewidth) load them unchanged.
+    """
+    epoch_names, jd = read_epochs(flux_lst, input_dir, combined_pattern,
+                                  exclude)
+    if not epoch_names:
+        raise ValueError('no combined epochs found in %s' % flux_lst)
+    print('%d epochs | JD %.2f -> %.2f' % (len(epoch_names), jd.min(),
+                                           jd.max()))
+
+    wl_grid, stack_f, stack_e = None, [], []
+    for name in epoch_names:
+        lam, f, e = load_spectrum(os.path.join(input_dir, name))
+        if wl_grid is None:
+            wl_grid = lam
+        elif len(lam) != len(wl_grid) or not np.allclose(lam, wl_grid):
+            raise ValueError('%s is on a different wavelength grid; '
+                             'resample onto a common grid first.' % name)
+        stack_f.append(f)
+        stack_e.append(e)
+    stack_f = np.array(stack_f)
+    stack_e = np.array(stack_e)
+
+    mean_flux = stack_f.mean(axis=0)
+    # propagated error of the pixel-wise mean: sqrt(sum err_i^2) / N
+    mean_err = np.sqrt(np.sum(stack_e ** 2, axis=0)) / stack_e.shape[0]
+    rms_flux = stack_f.std(axis=0)      # population std (ddof=0) across epochs
+    # error of the std itself: rms / sqrt(2(N-1))  (Gaussian approximation)
+    rms_err = rms_flux / np.sqrt(2.0 * (stack_f.shape[0] - 1))
+    print('Stacked %d spectra x %d pixels' % stack_f.shape)
+    print('median S/N of mean spectrum: %.1f'
+          % np.median(mean_flux / mean_err))
+
+    mean_out = 'spec_mean_%s.txt' % line_name
+    rms_out = 'spec_rms_%s.txt' % line_name
+    np.savetxt(mean_out, np.vstack((wl_grid, mean_flux, mean_err)).T)
+    np.savetxt(rms_out, np.vstack((wl_grid, rms_flux, rms_err)).T)
+    print('mean spectrum          : %s' % mean_out)
+    print('rms spectrum           : %s' % rms_out)
+    return mean_out
 
 
 def window_median(wave, flux, lim1, lim2):
@@ -81,19 +197,18 @@ def run_pipeline(wave, flux, err, p):
 
     p: dict with keys conti_left, conti_right, oiii_win, oiii4959_win,
     hb_win — each a (lo, hi) rest-frame window.
-    """
-    # ---- step 0: global linear continuum -------------------------------
-    fl, wl = window_median(wave, flux, *p['conti_left'])
-    fr, wr = window_median(wave, flux, *p['conti_right'])
-    fcon_tot = linear_through(wl, fl, wr, fr, wave)
-    fluxc = flux - fcon_tot
 
+    The [OIII] steps (1-2) run on the RAW flux: each carries its own local
+    linear continuum/background, so the global continuum plays no role there.
+    The global linear continuum is subtracted only for the Hbeta fit (step 3),
+    whose broad-line background model is just a constant.
+    """
     # ---- step 1: subtract [OIII]4959 using the 5007 profile ------------
     o1, o2 = p['oiii_win']
     idx = np.where((wave >= o1) & (wave <= o2))[0]
-    wave_o1s, flux_o1s = wave[idx], fluxc[idx]
-    fl, wl = window_median(wave, fluxc, o1 - 2, o1)
-    fr, wr = window_median(wave, fluxc, o2, o2 + 3)
+    wave_o1s, flux_o1s = wave[idx], flux[idx]
+    fl, wl = window_median(wave, flux, o1 - 2, o1)
+    fr, wr = window_median(wave, flux, o2, o2 + 3)
     fcon_o1s = linear_through(wl, fl, wr, fr, wave_o1s)
     flux_o1s = flux_o1s - fcon_o1s
 
@@ -116,23 +231,32 @@ def run_pipeline(wave, flux, err, p):
     idx49 = np.where((wave >= p['oiii4959_win'][0]) &
                      (wave <= p['oiii4959_win'][1]))[0]
     out1 = minimize(resi_4959, pars1,
-                    args=(wave[idx49], fluxc[idx49], err[idx49]))
+                    args=(wave[idx49], flux[idx49], err[idx49]))
 
     narrow_4959 = model_4959(out1.params, wave, with_background=False)
-    fluxc = fluxc - narrow_4959
+    flux1 = flux - narrow_4959
 
     # ---- step 2: clean [OIII]5007 profile (the narrow template) --------
-    fl, wl = window_median(wave, fluxc, o1 - 2, o1 + 3)
-    fr, wr = window_median(wave, fluxc, o2 - 2, o2 + 3)
+    fl, wl = window_median(wave, flux1, o1 - 2, o1 + 3)
+    fr, wr = window_median(wave, flux1, o2 - 2, o2 + 3)
     wave_t = wave[idx]
     fcon_5007 = linear_through(wl, fl, wr, fr, wave_t)
-    flux_t = fluxc[idx] - fcon_5007
+    flux_t = flux1[idx] - fcon_5007
     err_t = err[idx]
 
     narrow_5007 = np.interp(wave, wave_t, flux_t, left=0.0, right=0.0)
-    fluxc = fluxc - narrow_5007
 
     # ---- step 3: Hbeta = narrow template + 2 Gaussians + constant ------
+    # Global linear continuum subtracted here only, and measured on the
+    # NARROW-SUBTRACTED flux: continuum windows may sit near [OIII]
+    # (broad Hbeta extends underneath), and the fitted narrow lines must
+    # not be counted in the continuum level (avoids double subtraction).
+    flux_ns = flux1 - narrow_5007
+    fl, wl = window_median(wave, flux_ns, *p['conti_left'])
+    fr, wr = window_median(wave, flux_ns, *p['conti_right'])
+    fcon_tot = linear_through(wl, fl, wr, fr, wave)
+    fluxc = flux_ns - fcon_tot
+
     hb1, hb2 = p['hb_win']
     idxhb = np.where((wave >= hb1) & (wave <= hb2))[0]
     wave_hb, flux_hb, err_hb = wave[idxhb], fluxc[idxhb], err[idxhb]
@@ -175,7 +299,7 @@ def run_pipeline(wave, flux, err, p):
                           left=0.0, right=0.0)
 
     narrow_total = narrow_4959 + narrow_5007 + narrow_hb
-    flux_sub = fluxc - narrow_hb + fcon_tot   # broad Hbeta + continuum kept
+    flux_sub = flux - narrow_total   # broad Hbeta + continuum kept
 
     return {
         'flux_sub': flux_sub,
@@ -237,34 +361,31 @@ def make_plot(wave, flux, err, p, r, mc, obj_name, outfile, show):
         matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    fluxc = flux - r['fcon_tot']
-
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
     fig.suptitle(obj_name)
     for ax in axes.flat:
         ax.grid(alpha=0.2, linewidth=0.5)
 
-    # panel 1: [OIII]4959 subtraction
+    # panel 1: [OIII]4959 subtraction (raw-flux space)
     ax = axes[0, 0]
     idx = np.where((wave >= 4650.0) & (wave <= 5200.0))[0]
-    ax.plot(wave[idx], fluxc[idx], color=C_DATA, lw=1.0, label='obs (con sub)')
+    ax.plot(wave[idx], flux[idx], color=C_DATA, lw=1.0, label='obs')
     ax.plot(r['wave_o1s'], r['flux_o1s'] + r['fcon_o1s'], ':',
             color=C_NARROW, label='[OIII]5007')
     ax.plot(r['wave_o1s'], r['fcon_o1s'], ':', color=C_CON,
             label='5007 local con')
-    ax.plot(wave[idx], (fluxc - r['narrow_4959'])[idx], color=C_SUB, lw=1.0,
+    ax.plot(wave[idx], (flux - r['narrow_4959'])[idx], color=C_SUB, lw=1.0,
             label='4959 subtracted')
     ax.plot(wave[idx], r['narrow_4959'][idx], '--', color=C_MODEL,
             label='4959 model')
-    ax.axhline(0.0, color='gray', lw=0.5)
     ax.set_title('[OIII]4959 subtraction')
     ax.legend(fontsize=8)
 
-    # panel 2: [OIII]5007 template extraction
+    # panel 2: [OIII]5007 template extraction (raw-flux space)
     ax = axes[0, 1]
     o1, o2 = p['oiii_win']
     idx = np.where((wave >= o1 - 50) & (wave <= o2 + 80))[0]
-    ax.plot(wave[idx], (fluxc - r['narrow_4959'])[idx], color=C_DATA, lw=1.0,
+    ax.plot(wave[idx], (flux - r['narrow_4959'])[idx], color=C_DATA, lw=1.0,
             label='4959 subtracted')
     ax.plot(r['wave_t'], r['fcon_5007'], '--', color=C_CON, label='local con')
     ax.plot(r['wave_t'], r['flux_t'], color=C_NARROW, label='5007 template')
@@ -323,7 +444,25 @@ def main():
         description='Narrow-line subtraction for a rest-frame mean spectrum '
                     '(logic of code_asymmetry.py, + Monte Carlo errors).')
     ap.add_argument('spec', nargs='?', default='./combined.txt.meanrms',
-                    help='spectrum file: wave flux err, rest-frame')
+                    help='spectrum file: wave flux err, rest-frame '
+                         '(ignored when --input-dir is given)')
+    ap.add_argument('--input-dir', default=None,
+                    help='step 0: directory of AGN-only REST-FRAME per-epoch '
+                         'combined spectra; build mean & RMS spectra first '
+                         'and fit the mean (requires --flux-lst)')
+    ap.add_argument('--flux-lst', default=None,
+                    help='step 0: epoch list, one "<combined-name> <JD>" per '
+                         'row')
+    ap.add_argument('--line-name', default='hbeta',
+                    help='step 0: tag for spec_mean_/spec_rms_ file names '
+                         '(default hbeta)')
+    ap.add_argument('--combined-pattern', default='_combined.txt',
+                    help='step 0: substring marking a per-epoch combined '
+                         'spectrum (default _combined.txt)')
+    ap.add_argument('--exclude', nargs='*', default=['rebin', '.out'],
+                    metavar='SUBSTR',
+                    help='step 0: skip spectra whose name contains any of '
+                         'these substrings (default: rebin .out)')
     ap.add_argument('--contil', nargs=2, type=float, required=True,
                     metavar=('LO', 'HI'), help='left global continuum window')
     ap.add_argument('--contir', nargs=2, type=float, required=True,
@@ -354,7 +493,15 @@ def main():
          'oiii4959_win': tuple(args.oiii4959),
          'hb_win': tuple(args.hb)}
 
-    wave, flux, err = read_spec(args.spec)
+    spec = args.spec
+    if args.input_dir is not None:
+        if args.flux_lst is None:
+            ap.error('--input-dir requires --flux-lst')
+        print('--- step 0: mean & RMS spectra ---')
+        spec = build_mean_rms(args.input_dir, args.flux_lst, args.line_name,
+                              args.combined_pattern, args.exclude)
+
+    wave, flux, err = read_spec(spec)
     flux = flux / UNIT
     err = err / UNIT
 
@@ -388,7 +535,7 @@ def main():
     err_out = np.sqrt(err**2 + sig_total**2)
 
     # narrow-subtracted spectrum, same 3-column format as the original
-    outname = args.spec + '.subnarrow'
+    outname = spec + '.subnarrow'
     with open(outname, 'w') as f:
         for i in range(wave.size):
             f.write('%f  %e  %e\n'
