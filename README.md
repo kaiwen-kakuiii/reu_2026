@@ -1,3 +1,5 @@
+Version 0.50: add code to do velocity-resolved time lag.
+
 Version 0.30: major update to the pipeline.
 
 Version 0.21: update mean/rms spec code.
