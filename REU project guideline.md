@@ -70,6 +70,12 @@
 - **Deliver:** M_BH value per season. Put code/results in `results/season_x/mass/`
 - **Per season:** `[ ]` S1  `[ ]` S2  `[ ]` S3 …
 
+### Task 10 — Velocity Resolved Time lags (ICCF / or MICA)
+- **Goal:** Velocity-resolved lag per season.
+- **Do:** Run code (velocity_bins) on mean/rms spec to get the velocity bins (equal flux and equal width), get LC (velocity_lc_pipeline), and run ICCF and/or MICA on WIRO + surveys.
+- **Deliver:** CCCD + CCF files and plots, both versions, per season. Put result files in `results/season_x/ccf/` and name differently for rms/mean + equal flux/width.
+- **Per season:** `[ ]` S1  `[ ]` S2  `[ ]` S3 …
+
 ### These additional steps should be done in parallel:
 
 ### Task 10 — Literature research
