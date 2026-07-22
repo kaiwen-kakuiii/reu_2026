@@ -1,3 +1,5 @@
+Version 0.51: life quality update - now can run multiple season CCF at same time.
+
 Version 0.50: add code to do velocity-resolved time lag.
 
 Version 0.30: major update to the pipeline.
