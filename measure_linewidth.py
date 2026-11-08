@@ -32,8 +32,10 @@ Uncertainties (bootstrap, MAHA convention; MAHA III Sec. 3.4):
   continuum + both width measures, repeat --nboot times; the MEDIAN of
   the distribution is the reported width and the STD is its error.
 
-Instrumental broadening (--lsf, km/s): subtracted in quadrature from
-the bootstrap widths (Peterson+04 eq. 6; MAHA uses 925 km/s).
+Instrumental broadening (--lsf, km/s): the instrumental FWHM (MAHA: 925).
+Assuming a Gaussian LSF, subtract --lsf in quadrature from FWHM and
+--lsf / sqrt(8 ln 2) from line dispersion. FWHM quadrature correction
+is approximate for non-Gaussian broad lines (Peterson+04 eq. 6).
 
 Outputs (obj tag = --obj, default: current directory name)
   <obj>_linewidth.txt       summary table (direct + bootstrap, A & km/s)
@@ -55,6 +57,7 @@ import numpy as np
 
 UNIT = 1.0e-14
 C_KMS = 299792.458
+GAUSSIAN_FWHM_FACTOR = np.sqrt(8.0 * np.log(2.0))
 
 # Okabe-Ito colorblind-safe palette, fixed assignment
 C_DATA = '#000000'       # observed spectrum
@@ -254,14 +257,23 @@ def bootstrap(wave, flux, p, nboot, seed, keep_duplicates=False):
     return result
 
 
-def subtract_lsf(width_kms, err_kms, lsf_kms):
-    """Quadrature removal of instrumental broadening (Peterson+04 eq. 6).
+def subtract_lsf(width_kms, err_kms, lsf_kms, *, kind='fwhm'):
+    """Remove a Gaussian LSF, with lsf_kms always its FWHM in km/s.
 
-    Error propagated as err_true = err_obs * w_obs / w_true.
+    kind='fwhm' uses the instrumental FWHM; kind='sigma' converts it
+    to instrumental dispersion. FWHM quadrature is approximate for
+    non-Gaussian broad lines. At fixed LSF, the propagated error is
+    err_true = err_obs * w_obs / w_true; LSF uncertainty is not included.
     """
-    if not np.isfinite(width_kms) or width_kms <= lsf_kms:
+    if kind == 'fwhm':
+        inst_width = lsf_kms
+    elif kind == 'sigma':
+        inst_width = lsf_kms / GAUSSIAN_FWHM_FACTOR
+    else:
+        raise ValueError("kind must be 'fwhm' or 'sigma'")
+    if not np.isfinite(width_kms) or width_kms <= inst_width:
         return np.nan, np.nan
-    true = np.sqrt(width_kms**2 - lsf_kms**2)
+    true = np.sqrt(width_kms**2 - inst_width**2)
     return true, err_kms * width_kms / true
 
 
@@ -345,7 +357,8 @@ def main():
                          'blue and red peaks (default: single-peaked)')
     ap.add_argument('--lsf', type=float, default=0.0,
                     help='instrumental line-spread function FWHM in km/s, '
-                         'removed in quadrature (MAHA: 925; default 0 = off)')
+                         'converted to sigma for dispersion correction '
+                         'assuming a Gaussian LSF (MAHA: 925; default 0 = off)')
     ap.add_argument('--nboot', type=int, default=500,
                     help='number of bootstrap realizations (default 500)')
     ap.add_argument('--seed', type=int, default=42)
@@ -417,13 +430,15 @@ def main():
              % (r['sigma_kms'], bt['sigma_kms'][0], bt['sigma_kms'][1])]
 
     if args.lsf > 0.0:
-        print('--- instrumental broadening removed (%.0f km/s, quadrature) '
-              '---' % args.lsf)
+        print('--- Gaussian LSF removed in quadrature: FWHM %.1f km/s, '
+              'sigma %.2f km/s ---'
+              % (args.lsf, args.lsf / GAUSSIAN_FWHM_FACTOR))
         for key, tag in (('fwhm_kms', 'FWHM'), ('sigma_kms', 'sigma_line')):
-            true, terr = subtract_lsf(bt[key][0], bt[key][1], args.lsf)
+            true, terr = subtract_lsf(bt[key][0], bt[key][1], args.lsf,
+                                      kind=key.replace('_kms', ''))
             print('%-22s : %.0f +/- %.0f km/s' % (tag + ' (corrected)',
                                                   true, terr))
-            lines.append('%s_corr %12.2f %12.2f   # lsf %.0f km/s'
+            lines.append('%s_corr %12.2f %12.2f   # Gaussian LSF FWHM %.1f km/s'
                          % (key.replace('_kms', ''), true, terr, args.lsf))
 
     sumname = '%s_linewidth.txt' % obj_name

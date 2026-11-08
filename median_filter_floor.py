@@ -59,10 +59,13 @@ def _cli(argv=None):
 
         python median_filter_floor.py <lc> [-o OUT] [--size N] [--no-sort]
 
-    Input  : whitespace LC with columns  JD  flux  err  [extra...].
-    Output : same file with the err column replaced by
+    Input  : whitespace LC with columns  JD  flux  err_ccf  [extra...].
+    Output : same file with the CCF error column replaced by
                  sqrt(err^2 + floor^2)
-             all other columns (e.g. a survey label) preserved verbatim.
+             If the header declares 'columns: JD flux err_ccf err_total',
+             add the same floor in quadrature to err_total, preserving the
+             shared narrow variance err_total^2 - err_ccf^2. Other extra
+             columns (e.g. a survey label) are preserved verbatim.
     The floor is a single scalar (one number for the whole LC). Because it is
     temporal, the LC is sorted by JD to compute it (disable with --no-sort);
     rows are written back in their ORIGINAL order.
@@ -72,7 +75,7 @@ def _cli(argv=None):
 
     ap = argparse.ArgumentParser(
         description="Add the median-filter rapid-variability error floor to a light curve.")
-    ap.add_argument("lc", help="input light curve: columns 'JD flux err [extra...]'")
+    ap.add_argument("lc", help="input light curve: columns 'JD flux err_ccf [extra...]'")
     ap.add_argument("-o", "--out", help="output path (default: <stem>_mffloor<ext>)")
     ap.add_argument("--size", type=int, default=5,
                     help="median-filter window in epochs (default 5)")
@@ -80,6 +83,12 @@ def _cli(argv=None):
                     help="compute the floor in file order instead of sorting by JD")
     args = ap.parse_args(argv)
 
+    with open(args.lc) as f:
+        input_lines = f.readlines()
+    has_total_error = any(
+        line.startswith("#") and line.lstrip("# ").split()[:5]
+        == ["columns:", "JD", "flux", "err_ccf", "err_total"]
+        for line in input_lines)
     jd, flux, err = np.loadtxt(args.lc, usecols=(0, 1, 2), unpack=True)
 
     if args.no_sort:
@@ -87,32 +96,38 @@ def _cli(argv=None):
     else:
         floor = median_filter_scatter(flux[np.argsort(jd)], size=args.size)
     err_new = np.sqrt(err ** 2 + floor ** 2)
+    if has_total_error:
+        err_total = np.loadtxt(args.lc, usecols=3)
+        err_total_new = np.sqrt(err_total ** 2 + floor ** 2)
 
     out = args.out
     if out is None:
         root, ext = os.path.splitext(args.lc)
         out = f"{root}_mffloor{ext or '.txt'}"
 
-    # Rewrite line-by-line so any extra columns (survey label, etc.) survive.
+    # Rewrite line-by-line so headers and unrelated extra columns survive.
     # loadtxt skips comments/blanks, so the data-row index k stays aligned.
     out_lines, k = [], 0
-    with open(args.lc) as f:
-        for line in f:
-            s = line.rstrip("\n")
-            t = s.strip()
-            if not t or t.startswith("#"):
-                out_lines.append(s)
-                continue
-            toks = t.split()
-            toks[2] = f"{err_new[k]:.18e}"
-            out_lines.append(" ".join(toks))
-            k += 1
+    for line in input_lines:
+        s = line.rstrip("\n")
+        t = s.strip()
+        if not t or t.startswith("#"):
+            out_lines.append(s)
+            continue
+        toks = t.split()
+        toks[2] = f"{err_new[k]:.18e}"
+        if has_total_error:
+            toks[3] = f"{err_total_new[k]:.18e}"
+        out_lines.append(" ".join(toks))
+        k += 1
     with open(out, "w") as f:
         f.write("\n".join(out_lines) + "\n")
 
     frac = np.median(floor / np.abs(flux))
     print(f"median-filter floor = {floor:.4e}  (size={args.size}, ~{frac:.2%} of |flux|)")
     print(f"err median: {np.median(err):.4e} -> {np.median(err_new):.4e}")
+    if has_total_error:
+        print("err_total updated; shared narrow-model variance preserved")
     print(f"wrote {out}  ({k} epochs)")
 
 

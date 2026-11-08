@@ -13,6 +13,11 @@ For every (continuum, line) pair listed in JOBS this script:
 
 Run it as a normal single-process script (NOT with mpirun):
     python sample_all_season.py
+
+Inputs: JD flux err_ccf [err_total]. Only the first three columns enter
+CCF/FR. The optional total-error column includes a shared narrow-template
+term for separate flux analysis. Legacy three-column files remain readable;
+regenerate old pipeline products to remove their narrow term from column 3.
 """
 
 import numpy as np
@@ -127,9 +132,10 @@ def main():
         con_file, line_file, label = job[0], job[1], job[2]
         lag_range = job[3] if len(job) > 3 else LAG_RANGE
 
-        data = np.loadtxt(con_file)
+        # Column 3 is the CCF uncertainty. Never use optional err_total in FR.
+        data = np.loadtxt(con_file, usecols=(0, 1, 2), ndmin=2)
         jd_con, con, econ = data[:, 0], data[:, 1], data[:, 2]
-        data = np.loadtxt(line_file)
+        data = np.loadtxt(line_file, usecols=(0, 1, 2), ndmin=2)
         jd_line, line, eline = data[:, 0], data[:, 1], data[:, 2]
 
         (tlag_peak, status_peak, tlag_centroid, status_centroid,

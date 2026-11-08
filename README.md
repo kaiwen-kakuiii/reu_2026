@@ -1,3 +1,5 @@
+Version 0.60: correct instrumental broadening for FWHM and sigma, use continuum-subtracted emission-line RMS for velocity bins, and separate CCF errors from shared narrow-line uncertainty with an extra total-error column.
+
 Version 0.51: life quality update - now can run multiple season CCF at same time.
 
 Version 0.50: add code to do velocity-resolved time lag.

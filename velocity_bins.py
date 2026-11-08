@@ -4,13 +4,20 @@ Velocity bins of the broad Hbeta profile for velocity-resolved time lags
 (CLI version).
 
 Same pipeline as velocity_bins.ipynb -- keep the two in sync.
-Input: rms spectrum (spec_rms_<line>.txt) or narrow-subtracted mean
-spectrum (spec_mean_<line>.txt.subnarrow), REST-FRAME wavelength,
-2 or 3 columns: wave flux [err].
+Primary input: line-only RMS built from the per-epoch spectra after local
+continuum subtraction. Keep the original RMS for choosing the line window.
+With --build-line-rms, the positional spectrum path is the NEW output file;
+otherwise it is an existing spectrum (REST-FRAME, wave flux [err]).
+Legacy total-flux RMS and narrow-subtracted mean inputs remain supported.
 
 Method (Denney et al. 2009, ApJ 704, L80; MAHA I Sec. 4.4 + App. B)
-  P(lambda) = flux above a linear continuum interpolated between two
-  line-free windows (same convention as measure_linewidth).
+  For line-only RMS, subtract the fixed narrow model and local continuum
+  from EACH epoch, then compute std(ddof=0) inside the chosen line window.
+  Continuum anchors match velocity_lc_pipeline: median flux at each window
+  midpoint. P(lambda) is this RMS, with no second continuum subtraction.
+  Measurement noise remains; this is not an excess-variance estimator.
+  For legacy spectra, P(lambda) is flux above a linear baseline between
+  two line-free windows (same convention as measure_linewidth).
   Zero velocity = flux centroid of the narrow-Hbeta model column of
   <obj>_narrow_profile.txt (written by subtract_narrow_mean), so
   v = c (lambda - lam0) / lam0.
@@ -32,18 +39,23 @@ Method (Denney et al. 2009, ApJ 704, L80; MAHA I Sec. 4.4 + App. B)
   such bins are not kinematically independent of their neighbours.
 
 Outputs (obj tag = --obj, default: current directory name; spec tag =
---tag, default guessed from the input file name: rms / mean / spec)
+--tag, default: rms_lineonly for marked line RMS; otherwise rms/mean/spec)
   <obj>_velbins_<tag>_eqflux.txt    edges + per-bin flux table
   <obj>_velbins_<tag>_eqwidth.txt   same for the equal-width scheme
   <obj>_velbins_<tag>.pdf           profile + edges, both schemes
 
 Usage
 -----
-  python velocity_bins.py spec_rms_hbeta.txt \\
+  python velocity_bins.py spec_rms_hbeta_lineonly.txt --build-line-rms \\
+      --input-dir PATH_TO_EPOCHS --flux-lst PATH_TO_FLUX_LST \\
       --line 4800 4950 --contil 4780 4800 --contir 4950 4970 \\
       --narrow-profile NGC3227_narrow_profile.txt \\
-      [--nbins N] [--lsf 925] [--v0-wave 4861.5] \\
-      [--obj NAME] [--tag rms] [--no-plot] [--show]
+      --exclude rebin .out 20200205 --obj NGC3227
+
+  # Reuse the saved line RMS (no continuum windows needed):
+  python velocity_bins.py spec_rms_hbeta_lineonly.txt \\
+      --line 4800 4950 --narrow-profile NGC3227_narrow_profile.txt \\
+      [--nbins N] [--lsf 925] [--obj NAME] [--no-plot] [--show]
 """
 
 import argparse
@@ -69,6 +81,136 @@ def read_spec(filename):
         raise ValueError('need at least 2 columns: wave flux [err]')
     err = data[:, 2] if data.shape[1] > 2 else np.zeros(data.shape[0])
     return data[:, 0], data[:, 1], err
+
+
+def is_line_rms(filename):
+    """Recognize the saved line-RMS header, even if the file is renamed."""
+    with open(filename) as f:
+        for line in f:
+            if not line.startswith('#'):
+                break
+            if line.lstrip('# ').strip() == 'profile_kind line_rms':
+                return True
+    return False
+
+
+def line_rms_from_epochs(wave, fluxes, p, narrow_model=None):
+    """RMS of epoch residuals on the existing pixels inside the fixed window.
+
+    Inputs and output are in raw flux units. Anchors use the nominal window
+    midpoints, as in velocity_lc_pipeline. No RMS baseline or noise variance
+    is subtracted. A common, fixed narrow model is optional.
+    """
+    wave = np.asarray(wave, dtype=float)
+    fluxes = np.asarray(fluxes, dtype=float)
+    if wave.ndim != 1 or not np.all(np.isfinite(wave)) or np.any(np.diff(wave) <= 0):
+        raise ValueError('wavelengths must be finite and strictly increasing')
+    if fluxes.ndim != 2 or fluxes.shape[0] < 2 or fluxes.shape[1] != wave.size:
+        raise ValueError('line RMS needs at least two epochs on a common grid')
+    residual = fluxes.copy()
+    if narrow_model is not None:
+        narrow_model = np.asarray(narrow_model, dtype=float)
+        if narrow_model.shape != wave.shape or not np.all(np.isfinite(narrow_model)):
+            raise ValueError('narrow model must be finite and match the wavelength grid')
+        residual -= narrow_model
+    anchors, medians = [], []
+    for key in ('conti_left', 'conti_right'):
+        if p.get(key) is None:
+            raise ValueError('both continuum windows are required to build line RMS')
+        lo, hi = p[key]
+        mask = (wave >= lo) & (wave <= hi)
+        if lo >= hi or not mask.any() or lo < wave[0] or hi > wave[-1]:
+            raise ValueError('invalid or uncovered %s window' % key)
+        if not np.all(np.isfinite(residual[:, mask])):
+            raise ValueError('non-finite epoch fluxes in %s window' % key)
+        anchors.append(0.5 * (lo + hi))
+        medians.append(np.median(residual[:, mask], axis=1))
+    if anchors[1] <= anchors[0]:
+        raise ValueError('right continuum anchor must lie redward of the left')
+    slope = (medians[1] - medians[0]) / (anchors[1] - anchors[0])
+    residual -= medians[0][:, None] + slope[:, None] * (wave - anchors[0])
+    lo, hi = p['line_win']
+    mask = (wave >= lo) & (wave <= hi)
+    if lo >= hi or mask.sum() < 5 or lo < wave[0] or hi > wave[-1]:
+        raise ValueError('line window must be covered and contain at least 5 pixels')
+    if not np.all(np.isfinite(residual[:, mask])):
+        raise ValueError('non-finite epoch fluxes in line window')
+    return wave[mask], residual[:, mask].std(axis=0, ddof=0)
+
+
+def build_line_rms(input_dir, flux_lst, p, outname, narrow_profile=None,
+                   combined_pattern='_combined.txt', exclude=()):
+    """Read the selected combined epochs and save a separate two-column RMS.
+
+    Selection matches the LC pipeline: pattern, exclusions, existing files,
+    then JD order. No resampling is performed. The saved header records the
+    inputs and selected epochs; no RMS error estimate is manufactured.
+    """
+    import os
+
+    if os.path.exists(outname) and not is_line_rms(outname):
+        raise ValueError('refusing to overwrite an unmarked spectrum; choose a new line-RMS output path')
+    epochs = []
+    with open(flux_lst) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name = parts[0]
+            if combined_pattern not in name or any(s in name for s in exclude):
+                continue
+            try:
+                jd = float(parts[1])
+            except ValueError:
+                continue
+            if not os.path.exists(os.path.join(input_dir, name)):
+                print('  [skip] %s: not found in INPUT_DIR' % name)
+                continue
+            epochs.append((name, jd))
+    epochs.sort(key=lambda item: item[1])
+    if len(epochs) < 2:
+        raise ValueError('line RMS needs at least two selected combined epochs')
+    wave, stack = None, []
+    for name, _ in epochs:
+        data = np.loadtxt(os.path.join(input_dir, name))
+        if data.ndim != 2:
+            raise ValueError('%s: expected Nx3 or 3xN spectrum' % name)
+        if data.shape[1] == 3:
+            lam, flux, _ = data.T
+        elif data.shape[0] == 3:
+            lam, flux, _ = data
+        else:
+            raise ValueError('%s: expected Nx3 or 3xN spectrum' % name)
+        order = np.argsort(lam)
+        lam, flux = lam[order], flux[order]
+        if wave is None:
+            wave = lam
+        elif lam.shape != wave.shape or not np.allclose(lam, wave, rtol=0, atol=1e-6):
+            raise ValueError('%s: wavelength grid differs; resample before building RMS' % name)
+        stack.append(flux)
+    narrow_model = None
+    if narrow_profile is not None:
+        model = np.loadtxt(narrow_profile)
+        if model.ndim != 2 or model.shape[1] < 9:
+            raise ValueError('expected the 9-column narrow_profile format')
+        model = model[np.argsort(model[:, 0])]
+        narrow_model = np.interp(wave, model[:, 0], model[:, 1], left=0., right=0.)
+    w, rms = line_rms_from_epochs(wave, stack, p, narrow_model)
+    header = '\n'.join([
+        'profile_kind line_rms',
+        'wavelength_rest_A  line_rms_raw_flux_units',
+        'std(ddof=0) after per-epoch continuum subtraction; no noise correction or RMS error estimate',
+        'line_window %s | conti_left %s | conti_right %s' %
+        (p['line_win'], p['conti_left'], p['conti_right']),
+        'continuum anchors: median flux at nominal window midpoints',
+        'narrow_profile %s (fixed full model)' % narrow_profile,
+        'input_dir %s' % input_dir, 'flux_lst %s' % flux_lst,
+        'combined_pattern %s | exclude %s' % (combined_pattern, list(exclude)),
+        'epochs %d' % len(epochs),
+    ] + ['epoch %s %.10f' % item for item in epochs])
+    np.savetxt(outname, np.column_stack((w, rms)), header=header)
+    print('Line-only RMS: %s | %d epochs x %d line pixels' % (outname, len(epochs), w.size))
+    return w, rms
 
 
 def window_median(wave, flux, lim1, lim2):
@@ -305,15 +447,23 @@ def main():
                     'velocity-resolved lags: equal-flux and equal-width '
                     'schemes (Denney+09 / MAHA), v=0 at the narrow-Hbeta '
                     'centroid.')
-    ap.add_argument('spec', help='rms or narrow-subtracted mean spectrum: '
-                                 'wave flux [err], rest-frame')
+    ap.add_argument('spec', help='input spectrum; with --build-line-rms, NEW '
+                                 'line-RMS output path (wave flux, rest-frame)')
+    ap.add_argument('--build-line-rms', action='store_true',
+                    help='build line RMS from epochs before binning; spec is its output path')
+    ap.add_argument('--input-dir', help='directory of combined epoch spectra')
+    ap.add_argument('--flux-lst', help='epoch names and JD list, same as the LC pipeline')
+    ap.add_argument('--combined-pattern', default='_combined.txt')
+    ap.add_argument('--exclude', nargs='*', default=['rebin', '.out'],
+                    help='exclude filename substrings; match the LC epoch selection')
     ap.add_argument('--line', nargs=2, type=float, required=True,
                     metavar=('LO', 'HI'),
                     help='line window = Hbeta integration window (outer '
                          'bin boundaries)')
     ap.add_argument('--contil', nargs=2, type=float, default=None,
                     metavar=('LO', 'HI'),
-                    help='left continuum window (omit both: continuum = 0)')
+                    help='left per-epoch continuum window when building line RMS; '
+                         'legacy spectrum baseline otherwise')
     ap.add_argument('--contir', nargs=2, type=float, default=None,
                     metavar=('LO', 'HI'), help='right continuum window')
     ap.add_argument('--narrow-profile', default=None,
@@ -331,7 +481,7 @@ def main():
     ap.add_argument('--obj', default=None,
                     help='output name tag (default: current directory name)')
     ap.add_argument('--tag', default=None,
-                    help='spectrum tag in output names (default: rms/mean/'
+                    help='spectrum tag in output names (default: rms_lineonly/rms/mean/'
                          'spec guessed from the file name)')
     ap.add_argument('--no-plot', action='store_true')
     ap.add_argument('--show', action='store_true',
@@ -344,19 +494,30 @@ def main():
         ap.error('give exactly one of --narrow-profile / --v0-wave')
     if args.nbins is None and args.lsf <= 0.0:
         ap.error('--nbins is required when --lsf is 0')
+    if args.build_line_rms and (not args.input_dir or not args.flux_lst or args.contil is None):
+        ap.error('--build-line-rms requires --input-dir, --flux-lst, --contil and --contir')
+    if not args.build_line_rms and (args.input_dir or args.flux_lst):
+        ap.error('--input-dir and --flux-lst require --build-line-rms')
 
     obj_name = args.obj or os.path.basename(os.getcwd())
-    base = os.path.basename(args.spec).lower()
-    tag = args.tag or ('rms' if 'rms' in base
-                       else 'mean' if 'mean' in base else 'spec')
     p = {'line_win': tuple(args.line),
          'conti_left': tuple(args.contil) if args.contil else None,
          'conti_right': tuple(args.contir) if args.contir else None}
 
+    if args.build_line_rms:
+        build_line_rms(args.input_dir, args.flux_lst, p, args.spec,
+                       args.narrow_profile, args.combined_pattern, args.exclude)
+    line_only = is_line_rms(args.spec)
+    if line_only:
+        p = dict(p, conti_left=None, conti_right=None)
+        print('line-only RMS -> no second continuum/baseline subtraction; measurement noise remains')
+    base = os.path.basename(args.spec).lower()
+    tag = args.tag or ('rms_lineonly' if line_only else 'rms' if 'rms' in base
+                       else 'mean' if 'mean' in base else 'spec')
     wave, flux, err = read_spec(args.spec)
     flux = flux / UNIT
 
-    if p['conti_left'] is None:
+    if p['conti_left'] is None and not line_only:
         print('no continuum windows given -> continuum assumed 0')
 
     if args.narrow_profile is not None:

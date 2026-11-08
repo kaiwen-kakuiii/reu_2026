@@ -1,0 +1,17 @@
+# Keep only the original pipeline files and this ignore list in Git.
+# New guides, notes, tests, diagnostics, and generated outputs stay local.
+*
+!/.gitignore
+!/MW_dust_correction.ipynb
+!/README.md
+!/REU project guideline.md
+!/measure_linewidth.ipynb
+!/measure_linewidth.py
+!/median_filter_floor.py
+!/sample_all_season.py
+!/spec_lc_pipeline.ipynb
+!/subtract_narrow_mean.ipynb
+!/subtract_narrow_mean.py
+!/velocity_bins.ipynb
+!/velocity_bins.py
+!/velocity_lc_pipeline.ipynb
